@@ -1,15 +1,15 @@
-﻿mod jcs;
+mod jcs;
 mod ledger;
 mod ulid;
 
 use anyhow::Result;
 use axum::{
-    Router,
     body::Body,
     extract::{OriginalUri, Path as PathParam, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::Response,
     routing::post,
+    Router,
 };
 use bytes::Bytes;
 use futures_util::StreamExt as _;
@@ -54,9 +54,7 @@ struct AppState {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
-        )
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()))
         .init();
 
     // Resolution order:
@@ -86,8 +84,7 @@ async fn main() -> Result<()> {
         .trim_end_matches('/')
         .to_string();
 
-    let listen = std::env::var("HARNESS_LISTEN")
-        .unwrap_or_else(|_| "127.0.0.1:8474".to_string());
+    let listen = std::env::var("HARNESS_LISTEN").unwrap_or_else(|_| "127.0.0.1:8474".to_string());
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -163,11 +160,21 @@ async fn openai_handler(
         .unwrap_or("unknown")
         .to_string();
 
-    let upstream = send_upstream(&state.client, &upstream_url, &headers, body, &[SESSION_HEADER, UPSTREAM_HEADER, ROOT_HEADER])
-        .await
-        .map_err(|e| { error!("upstream error: {e}"); StatusCode::BAD_GATEWAY })?;
+    let upstream = send_upstream(
+        &state.client,
+        &upstream_url,
+        &headers,
+        body,
+        &[SESSION_HEADER, UPSTREAM_HEADER, ROOT_HEADER],
+    )
+    .await
+    .map_err(|e| {
+        error!("upstream error: {e}");
+        StatusCode::BAD_GATEWAY
+    })?;
 
-    let is_sse = upstream.headers()
+    let is_sse = upstream
+        .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.contains("text/event-stream"))
@@ -188,15 +195,32 @@ async fn openai_handler(
                 match item {
                     Ok(chunk) => {
                         buf.extend_from_slice(&chunk);
-                        if tx.send(Ok(chunk)).await.is_err() { break; }
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            break;
+                        }
                     }
-                    Err(e) => { let _ = tx.send(Err(e)).await; break; }
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
                 }
             }
             let (reason, think, act) = accumulate_sse_openai(&buf);
+            let usage = accumulate_sse_openai_usage(&buf);
             let has_think = think.is_some();
             let has_act = act.is_some();
-            match SessionLedger::append_entry(&root_task, &sid_task, &model_task, &in_hash_task, has_think, think.as_ref(), has_act, act.as_ref(), &reason) {
+            match SessionLedger::append_entry(
+                &root_task,
+                &sid_task,
+                &model_task,
+                &in_hash_task,
+                has_think,
+                think.as_ref(),
+                has_act,
+                act.as_ref(),
+                usage.as_ref(),
+                &reason,
+            ) {
                 Ok(entry) => info!("stream ledger: sid={} seq={}", sid_task, entry.seq),
                 Err(e) => error!("stream ledger write failed — stream unrecorded: {e}"),
             }
@@ -210,15 +234,28 @@ async fn openai_handler(
         Ok(res)
     } else {
         // Buffered path: fail-closed guarantee intact.
-        let res_bytes = upstream.bytes()
-            .await
-            .map_err(|e| { error!("upstream read error: {e}"); StatusCode::BAD_GATEWAY })?;
+        let res_bytes = upstream.bytes().await.map_err(|e| {
+            error!("upstream read error: {e}");
+            StatusCode::BAD_GATEWAY
+        })?;
         let (reason, think, act) = extract_openai(&res_bytes);
+        let usage = extract_openai_usage(&res_bytes);
         let entry = SessionLedger::append_entry(
-            &root, &sid, &model, &in_hash,
-            think.is_some(), think.as_ref(), act.is_some(), act.as_ref(), &reason,
+            &root,
+            &sid,
+            &model,
+            &in_hash,
+            think.is_some(),
+            think.as_ref(),
+            act.is_some(),
+            act.as_ref(),
+            usage.as_ref(),
+            &reason,
         )
-        .map_err(|e| { error!("ledger write failed — withholding response: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?;
+        .map_err(|e| {
+            error!("ledger write failed — withholding response: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
         let mut res = Response::new(Body::from(res_bytes));
         *res.status_mut() = StatusCode::OK;
         res.headers_mut().insert(
@@ -263,15 +300,14 @@ async fn anthropic_handler(
     let system_str;
     let system = match payload.get("system") {
         Some(Value::String(s)) => Some(s.as_str()),
-        Some(v) => { system_str = v.to_string(); Some(system_str.as_str()) }
+        Some(v) => {
+            system_str = v.to_string();
+            Some(system_str.as_str())
+        }
         None => None,
     };
 
-    let in_hash = ledger::hash_input(
-        system,
-        payload.get("messages"),
-        payload.get("tools"),
-    );
+    let in_hash = ledger::hash_input(system, payload.get("messages"), payload.get("tools"));
 
     let target_base = headers
         .get(UPSTREAM_HEADER)
@@ -286,11 +322,21 @@ async fn anthropic_handler(
         .unwrap_or("unknown")
         .to_string();
 
-    let upstream = send_upstream(&state.client, &upstream_url, &headers, body, &[SESSION_HEADER, UPSTREAM_HEADER, ROOT_HEADER])
-        .await
-        .map_err(|e| { error!("upstream error: {e}"); StatusCode::BAD_GATEWAY })?;
+    let upstream = send_upstream(
+        &state.client,
+        &upstream_url,
+        &headers,
+        body,
+        &[SESSION_HEADER, UPSTREAM_HEADER, ROOT_HEADER],
+    )
+    .await
+    .map_err(|e| {
+        error!("upstream error: {e}");
+        StatusCode::BAD_GATEWAY
+    })?;
 
-    let is_sse = upstream.headers()
+    let is_sse = upstream
+        .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.contains("text/event-stream"))
@@ -309,15 +355,32 @@ async fn anthropic_handler(
                 match item {
                     Ok(chunk) => {
                         buf.extend_from_slice(&chunk);
-                        if tx.send(Ok(chunk)).await.is_err() { break; }
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            break;
+                        }
                     }
-                    Err(e) => { let _ = tx.send(Err(e)).await; break; }
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
                 }
             }
             let (reason, think, act) = accumulate_sse_anthropic(&buf);
+            let usage = accumulate_sse_anthropic_usage(&buf);
             let has_think = think.is_some();
             let has_act = act.is_some();
-            match SessionLedger::append_entry(&root_task, &sid_task, &model_task, &in_hash_task, has_think, think.as_ref(), has_act, act.as_ref(), &reason) {
+            match SessionLedger::append_entry(
+                &root_task,
+                &sid_task,
+                &model_task,
+                &in_hash_task,
+                has_think,
+                think.as_ref(),
+                has_act,
+                act.as_ref(),
+                usage.as_ref(),
+                &reason,
+            ) {
                 Ok(entry) => info!("stream ledger: sid={} seq={}", sid_task, entry.seq),
                 Err(e) => error!("stream ledger write failed — stream unrecorded: {e}"),
             }
@@ -330,15 +393,28 @@ async fn anthropic_handler(
         );
         Ok(res)
     } else {
-        let res_bytes = upstream.bytes()
-            .await
-            .map_err(|e| { error!("upstream read error: {e}"); StatusCode::BAD_GATEWAY })?;
+        let res_bytes = upstream.bytes().await.map_err(|e| {
+            error!("upstream read error: {e}");
+            StatusCode::BAD_GATEWAY
+        })?;
         let (reason, think, act) = extract_anthropic(&res_bytes);
+        let usage = extract_anthropic_usage(&res_bytes);
         let entry = SessionLedger::append_entry(
-            &root, &sid, &model, &in_hash,
-            think.is_some(), think.as_ref(), act.is_some(), act.as_ref(), &reason,
+            &root,
+            &sid,
+            &model,
+            &in_hash,
+            think.is_some(),
+            think.as_ref(),
+            act.is_some(),
+            act.as_ref(),
+            usage.as_ref(),
+            &reason,
         )
-        .map_err(|e| { error!("ledger write failed — withholding response: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?;
+        .map_err(|e| {
+            error!("ledger write failed — withholding response: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
         let mut res = Response::new(Body::from(res_bytes));
         *res.status_mut() = StatusCode::OK;
         res.headers_mut().insert(
@@ -375,7 +451,9 @@ async fn send_upstream(
 }
 
 fn extract_openai(bytes: &[u8]) -> (String, Option<Value>, Option<Value>) {
-    let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return (String::new(), None, None) };
+    let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
+        return (String::new(), None, None);
+    };
     let reason = v["choices"][0]["message"]["content"]
         .as_str()
         .unwrap_or("")
@@ -387,32 +465,144 @@ fn extract_openai(bytes: &[u8]) -> (String, Option<Value>, Option<Value>) {
     // the API. Ceiling: think will be null for standard GPT and OpenAI o-series.
     // Wrapped in a single-element array for consistent array|null shape across all providers.
     let raw_think = v["choices"][0]["message"]["reasoning_content"].clone();
-    let think = if raw_think.is_null() { None } else { Some(Value::Array(vec![raw_think])) };
+    let think = if raw_think.is_null() {
+        None
+    } else {
+        Some(Value::Array(vec![raw_think]))
+    };
     (reason, think, act)
 }
 
+fn captured_usage(
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    raw: Vec<Value>,
+) -> Option<Value> {
+    if raw.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "raw": raw,
+    }))
+}
+
+fn extract_openai_usage(bytes: &[u8]) -> Option<Value> {
+    let v = serde_json::from_slice::<Value>(bytes).ok()?;
+    let raw = v.get("usage").filter(|usage| !usage.is_null())?.clone();
+    captured_usage(
+        raw.get("prompt_tokens").and_then(Value::as_u64),
+        raw.get("completion_tokens").and_then(Value::as_u64),
+        vec![raw],
+    )
+}
+
+fn accumulate_sse_openai_usage(buf: &[u8]) -> Option<Value> {
+    let text = std::str::from_utf8(buf).unwrap_or("");
+    let mut raw = Vec::new();
+    let mut input_tokens = None;
+    let mut output_tokens = None;
+    for line in text.lines() {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        let Some(usage) = v.get("usage").filter(|usage| !usage.is_null()) else {
+            continue;
+        };
+        input_tokens = usage
+            .get("prompt_tokens")
+            .and_then(Value::as_u64)
+            .or(input_tokens);
+        output_tokens = usage
+            .get("completion_tokens")
+            .and_then(Value::as_u64)
+            .or(output_tokens);
+        raw.push(usage.clone());
+    }
+    captured_usage(input_tokens, output_tokens, raw)
+}
+
 fn extract_anthropic(bytes: &[u8]) -> (String, Option<Value>, Option<Value>) {
-    let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return (String::new(), None, None) };
+    let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
+        return (String::new(), None, None);
+    };
     let mut reason = String::new();
     let mut think_blocks: Vec<Value> = Vec::new();
     let mut tool_use_blocks: Vec<Value> = Vec::new();
     if let Some(content) = v["content"].as_array() {
         for block in content {
             match block["type"].as_str() {
-                Some("text") => { reason = block["text"].as_str().unwrap_or("").to_string(); }
-                Some("thinking") => { think_blocks.push(block.clone()); }
-                Some("tool_use") => { tool_use_blocks.push(block.clone()); }
+                Some("text") => {
+                    reason = block["text"].as_str().unwrap_or("").to_string();
+                }
+                Some("thinking") => {
+                    think_blocks.push(block.clone());
+                }
+                Some("tool_use") => {
+                    tool_use_blocks.push(block.clone());
+                }
                 _ => {}
             }
         }
     }
-    let think = if think_blocks.is_empty() { None } else { Some(Value::Array(think_blocks)) };
+    let think = if think_blocks.is_empty() {
+        None
+    } else {
+        Some(Value::Array(think_blocks))
+    };
     let act = match tool_use_blocks.len() {
         0 => None,
         1 => tool_use_blocks.into_iter().next(),
         _ => Some(Value::Array(tool_use_blocks)),
     };
     (reason, think, act)
+}
+
+fn extract_anthropic_usage(bytes: &[u8]) -> Option<Value> {
+    let v = serde_json::from_slice::<Value>(bytes).ok()?;
+    let raw = v.get("usage").filter(|usage| !usage.is_null())?.clone();
+    captured_usage(
+        raw.get("input_tokens").and_then(Value::as_u64),
+        raw.get("output_tokens").and_then(Value::as_u64),
+        vec![raw],
+    )
+}
+
+fn accumulate_sse_anthropic_usage(buf: &[u8]) -> Option<Value> {
+    let text = std::str::from_utf8(buf).unwrap_or("");
+    let mut raw = Vec::new();
+    let mut input_tokens = None;
+    let mut output_tokens = None;
+    for line in text.lines() {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        let usage = match v["type"].as_str() {
+            Some("message_start") => v["message"].get("usage"),
+            Some("message_delta") => v.get("usage"),
+            _ => None,
+        };
+        let Some(usage) = usage.filter(|usage| !usage.is_null()) else {
+            continue;
+        };
+        input_tokens = usage
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .or(input_tokens);
+        output_tokens = usage
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .or(output_tokens);
+        raw.push(usage.clone());
+    }
+    captured_usage(input_tokens, output_tokens, raw)
 }
 
 /// Accumulate reasoning/text/tool content from an OpenAI SSE stream buffer.
@@ -427,7 +617,9 @@ fn accumulate_sse_openai(buf: &[u8]) -> (String, Option<Value>, Option<Value>) {
 
     for line in text.lines() {
         if let Some(data) = line.strip_prefix("data: ") {
-            if data.trim() == "[DONE]" { continue; }
+            if data.trim() == "[DONE]" {
+                continue;
+            }
             if let Ok(v) = serde_json::from_str::<Value>(data) {
                 let delta = &v["choices"][0]["delta"];
                 if let Some(c) = delta["content"].as_str() {
@@ -440,13 +632,18 @@ fn accumulate_sse_openai(buf: &[u8]) -> (String, Option<Value>, Option<Value>) {
                 if let Some(tcs) = delta["tool_calls"].as_array() {
                     for tc in tcs {
                         let idx = tc["index"].as_u64().unwrap_or(0) as usize;
-                        let entry = tool_calls.entry(idx)
+                        let entry = tool_calls
+                            .entry(idx)
                             .or_insert_with(|| (String::new(), String::new(), String::new()));
                         if let Some(id) = tc["id"].as_str() {
-                            if entry.0.is_empty() { entry.0 = id.to_string(); }
+                            if entry.0.is_empty() {
+                                entry.0 = id.to_string();
+                            }
                         }
                         if let Some(name) = tc["function"]["name"].as_str() {
-                            if entry.1.is_empty() { entry.1 = name.to_string(); }
+                            if entry.1.is_empty() {
+                                entry.1 = name.to_string();
+                            }
                         }
                         if let Some(args) = tc["function"]["arguments"].as_str() {
                             entry.2.push_str(args);
@@ -458,21 +655,27 @@ fn accumulate_sse_openai(buf: &[u8]) -> (String, Option<Value>, Option<Value>) {
     }
 
     // Wrapped in a single-element array for consistent array|null shape across all providers.
-    let think = if thinking.is_empty() { None } else { Some(Value::Array(vec![Value::String(thinking)])) };
+    let think = if thinking.is_empty() {
+        None
+    } else {
+        Some(Value::Array(vec![Value::String(thinking)]))
+    };
     let act = if tool_calls.is_empty() {
         None
     } else {
         let mut sorted: Vec<_> = tool_calls.into_iter().collect();
         sorted.sort_by_key(|(idx, _)| *idx);
-        let arr: Vec<Value> = sorted.into_iter().map(|(_, (id, name, args))| {
-            let arguments = serde_json::from_str::<Value>(&args)
-                .unwrap_or(Value::String(args));
-            serde_json::json!({
-                "id": id,
-                "type": "function",
-                "function": { "name": name, "arguments": arguments }
+        let arr: Vec<Value> = sorted
+            .into_iter()
+            .map(|(_, (id, name, args))| {
+                let arguments = serde_json::from_str::<Value>(&args).unwrap_or(Value::String(args));
+                serde_json::json!({
+                    "id": id,
+                    "type": "function",
+                    "function": { "name": name, "arguments": arguments }
+                })
             })
-        }).collect();
+            .collect();
         Some(Value::Array(arr))
     };
     (reason, think, act)
@@ -528,26 +731,32 @@ fn accumulate_sse_anthropic(buf: &[u8]) -> (String, Option<Value>, Option<Value>
     }
 
     // Stored as a minimal block array matching non-streaming shape; signature unavailable in SSE.
-    let think = if thinking.is_empty() { None } else {
-        Some(Value::Array(vec![serde_json::json!({"type": "thinking", "thinking": thinking})]))
+    let think = if thinking.is_empty() {
+        None
+    } else {
+        Some(Value::Array(vec![
+            serde_json::json!({"type": "thinking", "thinking": thinking}),
+        ]))
     };
     let act = if tool_blocks.is_empty() {
         None
     } else {
         let mut sorted: Vec<_> = tool_blocks.into_iter().collect();
         sorted.sort_by_key(|(idx, _)| *idx);
-        let blocks: Vec<Value> = sorted.into_iter().map(|(_, (mut block, input_str))| {
-            let input = if input_str.is_empty() {
-                Value::Object(serde_json::Map::new())
-            } else {
-                serde_json::from_str::<Value>(&input_str)
-                    .unwrap_or(Value::String(input_str))
-            };
-            if let Value::Object(ref mut map) = block {
-                map.insert("input".to_string(), input);
-            }
-            block
-        }).collect();
+        let blocks: Vec<Value> = sorted
+            .into_iter()
+            .map(|(_, (mut block, input_str))| {
+                let input = if input_str.is_empty() {
+                    Value::Object(serde_json::Map::new())
+                } else {
+                    serde_json::from_str::<Value>(&input_str).unwrap_or(Value::String(input_str))
+                };
+                if let Value::Object(ref mut map) = block {
+                    map.insert("input".to_string(), input);
+                }
+                block
+            })
+            .collect();
         if blocks.len() == 1 {
             blocks.into_iter().next()
         } else {
@@ -587,20 +796,22 @@ async fn gemini_handler(
     // Gemini uses systemInstruction for system prompt; contents for messages.
     let system_str;
     let system = match payload.get("systemInstruction") {
-        Some(v) => { system_str = v.to_string(); Some(system_str.as_str()) }
+        Some(v) => {
+            system_str = v.to_string();
+            Some(system_str.as_str())
+        }
         None => None,
     };
-    let in_hash = ledger::hash_input(
-        system,
-        payload.get("contents"),
-        payload.get("tools"),
-    );
+    let in_hash = ledger::hash_input(system, payload.get("contents"), payload.get("tools"));
 
     // Forward full path + query string so ?alt=sse reaches the Gemini endpoint.
     let upstream_url = format!(
         "{}{}",
         state.gemini_base,
-        original_uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/")
+        original_uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/")
     );
     // Strip method suffix for clean model name in the ledger.
     let model = model_path
@@ -608,11 +819,21 @@ async fn gemini_handler(
         .trim_end_matches(":generateContent")
         .to_string();
 
-    let upstream = send_upstream(&state.client, &upstream_url, &headers, body, &[SESSION_HEADER, UPSTREAM_HEADER, ROOT_HEADER])
-        .await
-        .map_err(|e| { error!("upstream error: {e}"); StatusCode::BAD_GATEWAY })?;
+    let upstream = send_upstream(
+        &state.client,
+        &upstream_url,
+        &headers,
+        body,
+        &[SESSION_HEADER, UPSTREAM_HEADER, ROOT_HEADER],
+    )
+    .await
+    .map_err(|e| {
+        error!("upstream error: {e}");
+        StatusCode::BAD_GATEWAY
+    })?;
 
-    let is_sse = upstream.headers()
+    let is_sse = upstream
+        .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.contains("text/event-stream"))
@@ -631,15 +852,32 @@ async fn gemini_handler(
                 match item {
                     Ok(chunk) => {
                         buf.extend_from_slice(&chunk);
-                        if tx.send(Ok(chunk)).await.is_err() { break; }
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            break;
+                        }
                     }
-                    Err(e) => { let _ = tx.send(Err(e)).await; break; }
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
                 }
             }
             let (reason, think, act) = accumulate_sse_gemini(&buf);
+            let usage = accumulate_sse_gemini_usage(&buf);
             let has_think = think.is_some();
             let has_act = act.is_some();
-            match SessionLedger::append_entry(&root_task, &sid_task, &model_task, &in_hash_task, has_think, think.as_ref(), has_act, act.as_ref(), &reason) {
+            match SessionLedger::append_entry(
+                &root_task,
+                &sid_task,
+                &model_task,
+                &in_hash_task,
+                has_think,
+                think.as_ref(),
+                has_act,
+                act.as_ref(),
+                usage.as_ref(),
+                &reason,
+            ) {
                 Ok(entry) => info!("stream ledger: sid={} seq={}", sid_task, entry.seq),
                 Err(e) => error!("stream ledger write failed — stream unrecorded: {e}"),
             }
@@ -652,15 +890,28 @@ async fn gemini_handler(
         );
         Ok(res)
     } else {
-        let res_bytes = upstream.bytes()
-            .await
-            .map_err(|e| { error!("upstream read error: {e}"); StatusCode::BAD_GATEWAY })?;
+        let res_bytes = upstream.bytes().await.map_err(|e| {
+            error!("upstream read error: {e}");
+            StatusCode::BAD_GATEWAY
+        })?;
         let (reason, think, act) = extract_gemini(&res_bytes);
+        let usage = extract_gemini_usage(&res_bytes);
         let entry = SessionLedger::append_entry(
-            &root, &sid, &model, &in_hash,
-            think.is_some(), think.as_ref(), act.is_some(), act.as_ref(), &reason,
+            &root,
+            &sid,
+            &model,
+            &in_hash,
+            think.is_some(),
+            think.as_ref(),
+            act.is_some(),
+            act.as_ref(),
+            usage.as_ref(),
+            &reason,
         )
-        .map_err(|e| { error!("ledger write failed — withholding response: {e}"); StatusCode::INTERNAL_SERVER_ERROR })?;
+        .map_err(|e| {
+            error!("ledger write failed — withholding response: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
         let mut res = Response::new(Body::from(res_bytes));
         *res.status_mut() = StatusCode::OK;
         res.headers_mut().insert(
@@ -680,7 +931,9 @@ async fn gemini_handler(
 }
 
 fn extract_gemini(bytes: &[u8]) -> (String, Option<Value>, Option<Value>) {
-    let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return (String::new(), None, None) };
+    let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
+        return (String::new(), None, None);
+    };
     let mut reason = String::new();
     let mut think_blocks: Vec<Value> = Vec::new();
     let mut fn_call_blocks: Vec<Value> = Vec::new();
@@ -695,13 +948,58 @@ fn extract_gemini(bytes: &[u8]) -> (String, Option<Value>, Option<Value>) {
             }
         }
     }
-    let think = if think_blocks.is_empty() { None } else { Some(Value::Array(think_blocks)) };
+    let think = if think_blocks.is_empty() {
+        None
+    } else {
+        Some(Value::Array(think_blocks))
+    };
     let act = match fn_call_blocks.len() {
         0 => None,
         1 => fn_call_blocks.into_iter().next(),
         _ => Some(Value::Array(fn_call_blocks)),
     };
     (reason, think, act)
+}
+
+fn extract_gemini_usage(bytes: &[u8]) -> Option<Value> {
+    let v = serde_json::from_slice::<Value>(bytes).ok()?;
+    let raw = v
+        .get("usageMetadata")
+        .filter(|usage| !usage.is_null())?
+        .clone();
+    captured_usage(
+        raw.get("promptTokenCount").and_then(Value::as_u64),
+        raw.get("candidatesTokenCount").and_then(Value::as_u64),
+        vec![raw],
+    )
+}
+
+fn accumulate_sse_gemini_usage(buf: &[u8]) -> Option<Value> {
+    let text = std::str::from_utf8(buf).unwrap_or("");
+    let mut raw = Vec::new();
+    let mut input_tokens = None;
+    let mut output_tokens = None;
+    for line in text.lines() {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        let Some(usage) = v.get("usageMetadata").filter(|usage| !usage.is_null()) else {
+            continue;
+        };
+        input_tokens = usage
+            .get("promptTokenCount")
+            .and_then(Value::as_u64)
+            .or(input_tokens);
+        output_tokens = usage
+            .get("candidatesTokenCount")
+            .and_then(Value::as_u64)
+            .or(output_tokens);
+        raw.push(usage.clone());
+    }
+    captured_usage(input_tokens, output_tokens, raw)
 }
 
 /// Accumulate from Gemini SSE stream. Each data: line is a complete
@@ -733,8 +1031,12 @@ fn accumulate_sse_gemini(buf: &[u8]) -> (String, Option<Value>, Option<Value>) {
     }
 
     // Stored as a single thought-part array matching non-streaming shape; accumulated across all chunks.
-    let think = if thinking.is_empty() { None } else {
-        Some(Value::Array(vec![serde_json::json!({"thought": true, "text": thinking})]))
+    let think = if thinking.is_empty() {
+        None
+    } else {
+        Some(Value::Array(vec![
+            serde_json::json!({"thought": true, "text": thinking}),
+        ]))
     };
     let act = match fn_call_blocks.len() {
         0 => None,
@@ -804,6 +1106,22 @@ mod extraction_tests {
         assert!(act.is_none());
     }
 
+    #[test]
+    fn extract_openai_provider_usage() {
+        let body = json!({"usage": {
+            "prompt_tokens": 21, "completion_tokens": 8, "total_tokens": 29,
+            "completion_tokens_details": {"reasoning_tokens": 3}
+        }});
+        let usage = extract_openai_usage(body.to_string().as_bytes()).unwrap();
+        assert_eq!(usage["input_tokens"], 21);
+        assert_eq!(usage["output_tokens"], 8);
+        assert_eq!(
+            usage["raw"][0]["completion_tokens_details"]["reasoning_tokens"],
+            3
+        );
+        assert!(extract_openai_usage(b"{}").is_none());
+    }
+
     // ── extract_anthropic ──────────────────────────────────────────────────────
 
     #[test]
@@ -826,8 +1144,8 @@ mod extraction_tests {
         let arr = think.unwrap();
         let arr = arr.as_array().expect("think must be array");
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["type"],      "thinking");
-        assert_eq!(arr[0]["thinking"],  "Let me think...");
+        assert_eq!(arr[0]["type"], "thinking");
+        assert_eq!(arr[0]["thinking"], "Let me think...");
         assert_eq!(arr[0]["signature"], "sig123");
         assert!(act.is_none());
     }
@@ -857,6 +1175,18 @@ mod extraction_tests {
         assert_eq!(act.unwrap().as_array().unwrap().len(), 2);
     }
 
+    #[test]
+    fn extract_anthropic_provider_usage() {
+        let body = json!({"usage": {
+            "input_tokens": 34, "output_tokens": 13,
+            "cache_read_input_tokens": 5
+        }});
+        let usage = extract_anthropic_usage(body.to_string().as_bytes()).unwrap();
+        assert_eq!(usage["input_tokens"], 34);
+        assert_eq!(usage["output_tokens"], 13);
+        assert_eq!(usage["raw"][0]["cache_read_input_tokens"], 5);
+    }
+
     // ── extract_gemini ─────────────────────────────────────────────────────────
 
     #[test]
@@ -880,7 +1210,7 @@ mod extraction_tests {
         let arr = arr.as_array().expect("think must be array");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["thought"], true);
-        assert_eq!(arr[0]["text"],    "Thinking...");
+        assert_eq!(arr[0]["text"], "Thinking...");
         assert!(act.is_none());
     }
 
@@ -894,6 +1224,18 @@ mod extraction_tests {
         assert!(think.is_none());
         // single functionCall returned unwrapped
         assert_eq!(act.unwrap()["name"], "search");
+    }
+
+    #[test]
+    fn extract_gemini_provider_usage() {
+        let body = json!({"usageMetadata": {
+            "promptTokenCount": 55, "candidatesTokenCount": 22,
+            "thoughtsTokenCount": 9, "totalTokenCount": 77
+        }});
+        let usage = extract_gemini_usage(body.to_string().as_bytes()).unwrap();
+        assert_eq!(usage["input_tokens"], 55);
+        assert_eq!(usage["output_tokens"], 22);
+        assert_eq!(usage["raw"][0]["thoughtsTokenCount"], 9);
     }
 
     // ── accumulate_sse_openai ──────────────────────────────────────────────────
@@ -924,6 +1266,20 @@ mod extraction_tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0].as_str().unwrap(), "Step 1 Step 2");
         assert!(act.is_none());
+    }
+
+    #[test]
+    fn sse_openai_provider_usage() {
+        let buf = sse(&[
+            json!({"choices": [{"delta": {"content": "Answer"}}]}),
+            json!({"choices": [], "usage": {
+                "prompt_tokens": 89, "completion_tokens": 14, "total_tokens": 103
+            }}),
+        ]);
+        let usage = accumulate_sse_openai_usage(&buf).unwrap();
+        assert_eq!(usage["input_tokens"], 89);
+        assert_eq!(usage["output_tokens"], 14);
+        assert_eq!(usage["raw"].as_array().unwrap().len(), 1);
     }
 
     // ── accumulate_sse_anthropic ───────────────────────────────────────────────
@@ -957,7 +1313,7 @@ mod extraction_tests {
         let arr = think.unwrap();
         let arr = arr.as_array().expect("think must be array");
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["type"],     "thinking");
+        assert_eq!(arr[0]["type"], "thinking");
         assert_eq!(arr[0]["thinking"], "Let me think");
         assert!(act.is_none());
     }
@@ -979,6 +1335,20 @@ mod extraction_tests {
         assert_eq!(act["type"], "tool_use");
         assert_eq!(act["name"], "search");
         assert_eq!(act["input"]["n"].as_u64().unwrap(), 42);
+    }
+
+    #[test]
+    fn sse_anthropic_provider_usage() {
+        let buf = sse(&[
+            json!({"type": "message_start", "message": {"usage": {
+                "input_tokens": 144, "output_tokens": 1
+            }}}),
+            json!({"type": "message_delta", "usage": {"output_tokens": 31}}),
+        ]);
+        let usage = accumulate_sse_anthropic_usage(&buf).unwrap();
+        assert_eq!(usage["input_tokens"], 144);
+        assert_eq!(usage["output_tokens"], 31);
+        assert_eq!(usage["raw"].as_array().unwrap().len(), 2);
     }
 
     // ── accumulate_sse_gemini ──────────────────────────────────────────────────
@@ -1007,7 +1377,22 @@ mod extraction_tests {
         let arr = arr.as_array().expect("think must be array");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["thought"], true);
-        assert_eq!(arr[0]["text"],    "Thinking...");
+        assert_eq!(arr[0]["text"], "Thinking...");
         assert!(act.is_none());
+    }
+
+    #[test]
+    fn sse_gemini_provider_usage() {
+        let buf = sse(&[
+            json!({"candidates": [{"content": {"parts": [{"text": "Answer"}]}}]}),
+            json!({"usageMetadata": {
+                "promptTokenCount": 233, "candidatesTokenCount": 44,
+                "thoughtsTokenCount": 17, "totalTokenCount": 294
+            }}),
+        ]);
+        let usage = accumulate_sse_gemini_usage(&buf).unwrap();
+        assert_eq!(usage["input_tokens"], 233);
+        assert_eq!(usage["output_tokens"], 44);
+        assert_eq!(usage["raw"][0]["thoughtsTokenCount"], 17);
     }
 }

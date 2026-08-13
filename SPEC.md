@@ -65,8 +65,13 @@ Every entry MUST contain:
 | `error`        | object        | Forensic error record. Present only when `act` is `null` due to a schema or processing failure.                                                                                                                                                                         |
 | `think`        | array \| null | Provider extended reasoning tokens, captured verbatim as an array. For Anthropic non-streaming: array of `{type, thinking, signature}` content blocks. For Anthropic streaming: array of `{type, thinking}` blocks — `signature` unavailable in SSE. For Grok non-streaming: single-element array wrapping the raw `reasoning_content` string. For Grok streaming: single-element array wrapping the accumulated reasoning string. For Gemini non-streaming: array of `{thought: true, text}` parts. For Gemini streaming: single-element `{thought: true, text}` array — accumulated across all stream chunks. `null` when the model produced no reasoning trace or the provider does not expose it. |
 | `transparency` | object        | `{"think": bool, "act": bool}` — machine-readable presence flags indicating whether `think` and `act` carry non-null data. Enables downstream analysis without content inspection.                                                                                     |
+| `usage`        | object \| null | Provider-reported token usage. `input_tokens` and `output_tokens` contain exact provider counts when supplied; either MAY be `null`. `raw` is a non-empty array preserving every native usage object observed in the response. `null` means the provider response supplied no usage object. Implementations MUST NOT estimate missing counts. |
 
 Implementations MAY add fields not listed here. Readers MUST ignore unknown fields (forward compatibility).
+
+Provider mappings for `usage` are intentionally narrow: OpenAI-compatible `prompt_tokens` / `completion_tokens`, Anthropic `input_tokens` / `output_tokens`, and Gemini `promptTokenCount` / `candidatesTokenCount`. Provider-specific details such as cached-input, reasoning, thought, and total-token counts remain available under `raw` without lossy normalization.
+
+For streaming responses, usage is captured only when the upstream emits it. The proxy does not modify requests to force optional usage events. Anthropic may report input and output counts in separate `message_start` and `message_delta` events; both raw objects are retained and the latest reported value for each normalized count is used.
 
 ### 4.4 Field constraints
 

@@ -57,9 +57,16 @@ client = Anthropic(base_url="http://127.0.0.1:8474", api_key="...")
     "name": "record_result",
     "input": { "status": "harness-act-verified" }
   },
+  "usage": {                    // exact provider-reported counts; null if absent
+    "input_tokens": 184,
+    "output_tokens": 37,
+    "raw": [{ "input_tokens": 184, "output_tokens": 37 }]
+  },
   "transparency": { "think": false, "act": true }
 }
 ```
+
+`usage.raw` preserves the provider's native usage object, including details such as cache or reasoning-token counts. The normalized `input_tokens` and `output_tokens` fields use provider-reported values only; the proxy never estimates missing counts. Streaming usage remains `null` when the upstream does not emit usage events.
 
 ---
 

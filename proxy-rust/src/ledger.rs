@@ -2,7 +2,7 @@
 /// Implements SPEC S4, S5, S8, S9.1.
 use crate::jcs;
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{File, OpenOptions},
@@ -11,7 +11,8 @@ use std::{
 };
 
 const PROTOCOL_VERSION: u64 = 1;
-const GENESIS_PREV: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+const GENESIS_PREV: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
 pub struct EntryMeta {
     pub seq: u64,
@@ -49,11 +50,11 @@ impl SessionLedger {
         think: Option<&Value>,
         has_act: bool,
         act: Option<&Value>,
+        usage: Option<&Value>,
         reason: &str,
     ) -> Result<EntryMeta> {
         let sessions_dir = root.join("sessions");
-        std::fs::create_dir_all(&sessions_dir)
-            .context("failed to create sessions directory")?;
+        std::fs::create_dir_all(&sessions_dir).context("failed to create sessions directory")?;
 
         let path: PathBuf = sessions_dir.join(format!("{}.jsonl", sid));
 
@@ -82,7 +83,9 @@ impl SessionLedger {
                 .context("truncate torn entry failed")?;
         }
 
-        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        let ts = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
 
         let entry = json!({
             "v": PROTOCOL_VERSION,
@@ -98,6 +101,7 @@ impl SessionLedger {
             "think": think,
             "reason": reason,
             "act": act,
+            "usage": usage,
             "prev": prev
         });
 
@@ -112,7 +116,10 @@ impl SessionLedger {
 
         let entry_hash = hash_entry(&entry);
 
-        Ok(EntryMeta { seq, prev: entry_hash })
+        Ok(EntryMeta {
+            seq,
+            prev: entry_hash,
+        })
     }
 }
 
@@ -131,7 +138,9 @@ fn scan_tail(file: &mut File) -> Result<(u64, String, Option<u64>)> {
     loop {
         let mut line = String::new();
         let n = reader.read_line(&mut line)?;
-        if n == 0 { break; } // EOF — clean end
+        if n == 0 {
+            break;
+        } // EOF — clean end
         let trimmed = line.trim();
         if trimmed.is_empty() {
             clean_end += n as u64;
@@ -185,9 +194,18 @@ mod tests {
     fn genesis_seq_and_prev() {
         let root = tmp_root("genesis");
         let meta = SessionLedger::append_entry(
-            &root, "s1", "m", "sha256:00",
-            false, None, false, None, "first",
-        ).expect("append");
+            &root,
+            "s1",
+            "m",
+            "sha256:00",
+            false,
+            None,
+            false,
+            None,
+            None,
+            "first",
+        )
+        .expect("append");
 
         assert_eq!(meta.seq, 0);
 
@@ -200,6 +218,34 @@ mod tests {
         assert_eq!(entry["prev"].as_str().unwrap(), GENESIS_PREV);
     }
 
+    #[test]
+    fn provider_usage_is_persisted_in_entry() {
+        let root = tmp_root("usage");
+        let usage = serde_json::json!({
+            "input_tokens": 12,
+            "output_tokens": 7,
+            "raw": [{"prompt_tokens": 12, "completion_tokens": 7}]
+        });
+        SessionLedger::append_entry(
+            &root,
+            "usage1",
+            "m",
+            "sha256:00",
+            false,
+            None,
+            false,
+            None,
+            Some(&usage),
+            "answer",
+        )
+        .expect("append");
+
+        let path = root.join("sessions").join("usage1.jsonl");
+        let content = std::fs::read_to_string(path).expect("read");
+        let entry: Value = serde_json::from_str(content.trim()).expect("parse");
+        assert_eq!(entry["usage"], usage);
+    }
+
     // --- §12.2 Hash chain round-trip ------------------------------------------
 
     #[test]
@@ -207,9 +253,18 @@ mod tests {
         let root = tmp_root("chain");
         for i in 0..3u64 {
             SessionLedger::append_entry(
-                &root, "s2", "m", "sha256:00",
-                false, None, false, None, &format!("entry {}", i),
-            ).expect("append");
+                &root,
+                "s2",
+                "m",
+                "sha256:00",
+                false,
+                None,
+                false,
+                None,
+                None,
+                &format!("entry {}", i),
+            )
+            .expect("append");
         }
 
         let path = root.join("sessions").join("s2.jsonl");
@@ -226,13 +281,19 @@ mod tests {
 
         let h0 = hash_entry(&entries[0]);
         assert_eq!(entries[1]["seq"], 1);
-        assert_eq!(entries[1]["prev"].as_str().unwrap(), h0,
-            "entry[1].prev must equal hash(entry[0])");
+        assert_eq!(
+            entries[1]["prev"].as_str().unwrap(),
+            h0,
+            "entry[1].prev must equal hash(entry[0])"
+        );
 
         let h1 = hash_entry(&entries[1]);
         assert_eq!(entries[2]["seq"], 2);
-        assert_eq!(entries[2]["prev"].as_str().unwrap(), h1,
-            "entry[2].prev must equal hash(entry[1])");
+        assert_eq!(
+            entries[2]["prev"].as_str().unwrap(),
+            h1,
+            "entry[2].prev must equal hash(entry[1])"
+        );
     }
 
     // --- §12.3 Tamper detection -----------------------------------------------
@@ -241,13 +302,31 @@ mod tests {
     fn tamper_detection() {
         let root = tmp_root("tamper");
         SessionLedger::append_entry(
-            &root, "s3", "m", "sha256:00",
-            false, None, false, None, "entry 0",
-        ).expect("append 0");
+            &root,
+            "s3",
+            "m",
+            "sha256:00",
+            false,
+            None,
+            false,
+            None,
+            None,
+            "entry 0",
+        )
+        .expect("append 0");
         SessionLedger::append_entry(
-            &root, "s3", "m", "sha256:00",
-            false, None, false, None, "entry 1",
-        ).expect("append 1");
+            &root,
+            "s3",
+            "m",
+            "sha256:00",
+            false,
+            None,
+            false,
+            None,
+            None,
+            "entry 1",
+        )
+        .expect("append 1");
 
         let path = root.join("sessions").join("s3.jsonl");
         let content = std::fs::read_to_string(path).expect("read");
@@ -256,8 +335,11 @@ mod tests {
         let e1: Value = serde_json::from_str(lines.next().unwrap()).expect("e1");
 
         // Chain is intact before tamper
-        assert_eq!(e1["prev"].as_str().unwrap(), hash_entry(&e0),
-            "chain must be intact on clean write");
+        assert_eq!(
+            e1["prev"].as_str().unwrap(),
+            hash_entry(&e0),
+            "chain must be intact on clean write"
+        );
 
         // Mutate one field — hash must diverge
         let mut e0_mut = e0.clone();
@@ -296,8 +378,7 @@ mod tests {
             writeln!(f, "{}", serde_json::to_string(&entry0).expect("serialize"))
                 .expect("write entry0");
             // Torn write: incomplete JSON, no closing brace, no newline
-            write!(f, r#"{{"v":1,"seq":1,"sid":"torn","reason":"in"#)
-                .expect("write torn fragment");
+            write!(f, r#"{{"v":1,"seq":1,"sid":"torn","reason":"in"#).expect("write torn fragment");
         }
 
         let mut file = OpenOptions::new()
@@ -308,10 +389,15 @@ mod tests {
         let (seq, prev, torn_offset) = scan_tail(&mut file).expect("scan_tail");
 
         assert_eq!(seq, 1, "seq continues from last clean entry (0 → 1)");
-        assert_eq!(prev, hash_entry(&entry0),
-            "prev is the hash of the last clean entry");
-        assert!(torn_offset.is_some(),
-            "torn_offset must be Some when a torn line is present");
+        assert_eq!(
+            prev,
+            hash_entry(&entry0),
+            "prev is the hash of the last clean entry"
+        );
+        assert!(
+            torn_offset.is_some(),
+            "torn_offset must be Some when a torn line is present"
+        );
     }
 
     // --- §12.5 Torn-line full recovery (write path) ---------------------------
@@ -323,43 +409,70 @@ mod tests {
         let root = tmp_root("recovery");
         // Write entry 0 through the normal path.
         SessionLedger::append_entry(
-            &root, "s5", "m", "sha256:00",
-            false, None, false, None, "entry 0",
-        ).expect("append entry 0");
+            &root,
+            "s5",
+            "m",
+            "sha256:00",
+            false,
+            None,
+            false,
+            None,
+            None,
+            "entry 0",
+        )
+        .expect("append entry 0");
 
         // Simulate a crash mid-write of entry 1 — append a torn fragment.
         let path = root.join("sessions").join("s5.jsonl");
         {
-            let mut f = OpenOptions::new().append(true).open(&path)
+            let mut f = OpenOptions::new()
+                .append(true)
+                .open(&path)
                 .expect("open for tear");
-            write!(f, r#"{{"v":1,"seq":1,"sid":"s5","reason":"torn"#)
-                .expect("write torn fragment");
+            write!(f, r#"{{"v":1,"seq":1,"sid":"s5","reason":"torn"#).expect("write torn fragment");
         }
 
         // Recovery write — append_entry must truncate the torn bytes first.
         SessionLedger::append_entry(
-            &root, "s5", "m", "sha256:00",
-            false, None, false, None, "entry 1 recovered",
-        ).expect("recovery append");
+            &root,
+            "s5",
+            "m",
+            "sha256:00",
+            false,
+            None,
+            false,
+            None,
+            None,
+            "entry 1 recovered",
+        )
+        .expect("recovery append");
 
         // File must now contain exactly 2 valid, chain-linked entries.
         let content = std::fs::read_to_string(&path).expect("read");
         let entries: Vec<Value> = content
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str(l)
-                .expect("parse — recovery must produce clean lines"))
+            .map(|l| serde_json::from_str(l).expect("parse — recovery must produce clean lines"))
             .collect();
 
-        assert_eq!(entries.len(), 2,
-            "file must contain exactly 2 readable entries after recovery");
+        assert_eq!(
+            entries.len(),
+            2,
+            "file must contain exactly 2 readable entries after recovery"
+        );
         assert_eq!(entries[0]["seq"], 0);
         assert_eq!(entries[1]["seq"], 1);
         let h0 = hash_entry(&entries[0]);
-        assert_eq!(entries[1]["prev"].as_str().unwrap(), h0,
-            "chain intact after recovery");
-        assert_eq!(entries[1]["reason"].as_str().unwrap(), "entry 1 recovered",
-            "recovery entry content preserved");
+        assert_eq!(
+            entries[1]["prev"].as_str().unwrap(),
+            h0,
+            "chain intact after recovery"
+        );
+        assert_eq!(
+            entries[1]["reason"].as_str().unwrap(),
+            "entry 1 recovered",
+            "recovery entry content preserved"
+        );
     }
 
     // --- §12.7 Cross-process sequence ----------------------------------------
@@ -387,8 +500,16 @@ mod tests {
             for i in 0..WRITES_PER_THREAD {
                 let _guard = turn.lock().unwrap();
                 SessionLedger::append_entry(
-                    &root_a, "sp1", "m", "sha256:aa",
-                    false, None, false, None, &format!("writer-A entry {}", i),
+                    &root_a,
+                    "sp1",
+                    "m",
+                    "sha256:aa",
+                    false,
+                    None,
+                    false,
+                    None,
+                    None,
+                    &format!("writer-A entry {}", i),
                 )
                 .expect("append from writer A");
             }
@@ -398,8 +519,16 @@ mod tests {
             for i in 0..WRITES_PER_THREAD {
                 let _guard = turn_b.lock().unwrap();
                 SessionLedger::append_entry(
-                    &root_b, "sp1", "m", "sha256:bb",
-                    false, None, false, None, &format!("writer-B entry {}", i),
+                    &root_b,
+                    "sp1",
+                    "m",
+                    "sha256:bb",
+                    false,
+                    None,
+                    false,
+                    None,
+                    None,
+                    &format!("writer-B entry {}", i),
                 )
                 .expect("append from writer B");
             }
@@ -417,26 +546,37 @@ mod tests {
             .collect();
 
         let total = WRITES_PER_THREAD * 2;
-        assert_eq!(entries.len(), total, "all {} entries must be present", total);
+        assert_eq!(
+            entries.len(),
+            total,
+            "all {} entries must be present",
+            total
+        );
 
         // seq must be strictly 0..total — no gaps, no duplicates.
         for (i, e) in entries.iter().enumerate() {
             assert_eq!(
-                e["seq"].as_u64().unwrap(), i as u64,
-                "entry[{}] must have seq={}", i, i
+                e["seq"].as_u64().unwrap(),
+                i as u64,
+                "entry[{}] must have seq={}",
+                i,
+                i
             );
         }
 
         // Hash chain must be intact across all entries regardless of writer.
         assert_eq!(
-            entries[0]["prev"].as_str().unwrap(), GENESIS_PREV,
+            entries[0]["prev"].as_str().unwrap(),
+            GENESIS_PREV,
             "first entry must carry genesis prev"
         );
         for i in 1..total {
             let expected = hash_entry(&entries[i - 1]);
             assert_eq!(
-                entries[i]["prev"].as_str().unwrap(), expected,
-                "chain break at entry[{}]", i
+                entries[i]["prev"].as_str().unwrap(),
+                expected,
+                "chain break at entry[{}]",
+                i
             );
         }
     }
