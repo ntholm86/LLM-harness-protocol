@@ -1127,6 +1127,79 @@ mod extraction_tests {
         let _ = std::fs::remove_dir_all(harness_root);
     }
 
+    #[tokio::test]
+    async fn openai_sse_handler_forwards_stream_and_persists_usage() {
+        let sse_body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Streamed answer\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":610,\"completion_tokens\":73,\"total_tokens\":683}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            post(move || async move {
+                Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(sse_body))
+                    .expect("SSE response")
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let upstream_base = format!("http://{}", listener.local_addr().expect("local address"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.expect("serve upstream");
+        });
+
+        let harness_root = std::env::temp_dir().join(format!(
+            "harness-sse-handler-{}-{}",
+            std::process::id(),
+            ulid::new_ulid()
+        ));
+        let sid = "01KTESTSTREAM0000000000000";
+        let state = Arc::new(AppState {
+            harness_root: harness_root.clone(),
+            upstream_base,
+            anthropic_base: String::new(),
+            gemini_base: String::new(),
+            client: reqwest::Client::new(),
+            default_session: None,
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(SESSION_HEADER, HeaderValue::from_static(sid));
+        let body = Bytes::from(
+            json!({
+                "model": "test-model",
+                "stream": true,
+                "messages": [{"role": "user", "content": "Test"}]
+            })
+            .to_string(),
+        );
+
+        let response = openai_handler(State(state), headers, body)
+            .await
+            .expect("handler response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let forwarded = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("consume forwarded stream");
+        assert_eq!(forwarded.as_ref(), sse_body.as_bytes());
+
+        let content = std::fs::read_to_string(
+            harness_root.join("sessions").join(format!("{sid}.jsonl")),
+        )
+        .expect("read ledger");
+        let entry: Value = serde_json::from_str(content.trim()).expect("parse ledger entry");
+        assert_eq!(entry["seq"], 0);
+        assert_eq!(entry["reason"], "Streamed answer");
+        assert_eq!(entry["usage"]["input_tokens"], 610);
+        assert_eq!(entry["usage"]["output_tokens"], 73);
+        assert_eq!(entry["usage"]["raw"][0]["total_tokens"], 683);
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(harness_root);
+    }
+
     // ── extract_openai ─────────────────────────────────────────────────────────
 
     #[test]
