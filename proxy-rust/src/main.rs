@@ -1060,6 +1060,73 @@ mod extraction_tests {
             .into_bytes()
     }
 
+    #[tokio::test]
+    async fn openai_handler_persists_upstream_provider_usage() {
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                axum::Json(json!({
+                    "choices": [{"message": {"content": "Answer"}}],
+                    "usage": {
+                        "prompt_tokens": 377,
+                        "completion_tokens": 61,
+                        "total_tokens": 438,
+                        "completion_tokens_details": {"reasoning_tokens": 19}
+                    }
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let upstream_base = format!("http://{}", listener.local_addr().expect("local address"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.expect("serve upstream");
+        });
+
+        let harness_root = std::env::temp_dir().join(format!(
+            "harness-handler-{}-{}",
+            std::process::id(),
+            ulid::new_ulid()
+        ));
+        let sid = "01KTESTUSAGE00000000000000";
+        let state = Arc::new(AppState {
+            harness_root: harness_root.clone(),
+            upstream_base,
+            anthropic_base: String::new(),
+            gemini_base: String::new(),
+            client: reqwest::Client::new(),
+            default_session: None,
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(SESSION_HEADER, HeaderValue::from_static(sid));
+        let body = Bytes::from(
+            json!({"model": "test-model", "messages": [{"role": "user", "content": "Test"}]})
+                .to_string(),
+        );
+
+        let response = openai_handler(State(state), headers, body)
+            .await
+            .expect("handler response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let content = std::fs::read_to_string(
+            harness_root.join("sessions").join(format!("{sid}.jsonl")),
+        )
+        .expect("read ledger");
+        let entry: Value = serde_json::from_str(content.trim()).expect("parse ledger entry");
+        assert_eq!(entry["seq"], 0);
+        assert_eq!(entry["usage"]["input_tokens"], 377);
+        assert_eq!(entry["usage"]["output_tokens"], 61);
+        assert_eq!(
+            entry["usage"]["raw"][0]["completion_tokens_details"]["reasoning_tokens"],
+            19
+        );
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(harness_root);
+    }
+
     // ── extract_openai ─────────────────────────────────────────────────────────
 
     #[test]
